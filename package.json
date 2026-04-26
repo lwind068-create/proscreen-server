@@ -1,0 +1,21 @@
+{
+  "name": "proscreen-alert-server",
+  "version": "1.0.0",
+  "description": "ProScreen price alert server with email and SMS notifications",
+  "main": "alert-server.js",
+  "scripts": {
+    "start": "node alert-server.js",
+    "dev": "node --watch alert-server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.18.2",
+    "node-fetch": "^3.3.2",
+    "nodemailer": "^6.9.14",
+    "twilio": "^5.2.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
