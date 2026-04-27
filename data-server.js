@@ -1,33 +1,17 @@
-// ═══════════════════════════════════════════════════════════════════════
-// ProScreen Data Server — Live Prices + Fundamentals
-// Combines: Polygon.io (prices/volume) + Financial Modeling Prep (fundamentals)
-//
-// SETUP:
-// 1. Add to your existing alert-server.js OR run this as a separate server
-// 2. Add to .env:
-//    POLYGON_API_KEY=your_polygon_key
-//    FMP_API_KEY=your_fmp_key
-// 3. npm install express cors node-fetch nodemailer twilio dotenv
-// 4. node data-server.js
-//
-// FREE TIER LIMITS:
-//   Polygon: 5 API calls/min, previous day prices (15-min delay on live)
-//   FMP:     250 calls/day, full fundamentals on all stocks
-// ═══════════════════════════════════════════════════════════════════════
-
 require('dotenv').config();
 const express = require('express');
 const cors    = require('cors');
 const app     = express();
 const PORT    = process.env.PORT || 3001;
 
-const POLYGON_KEY = process.env.POLYGON_API_KEY;
-const FMP_KEY     = process.env.FMP_API_KEY;
+const POLYGON_KEY    = process.env.POLYGON_API_KEY;
+const FMP_KEY        = process.env.FMP_API_KEY;
+const ANTHROPIC_KEY  = process.env.ANTHROPIC_API_KEY;
 
-app.use(cors({ origin: '*' })); // Lock this down to your domain in production
+app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// ── CACHE (reduces API calls, respects free tier limits) ─────────────────────
+// ── CACHE ─────────────────────────────────────────────────────
 const cache = new Map();
 function getCache(key) {
   const hit = cache.get(key);
@@ -38,184 +22,184 @@ function setCache(key, data, ttlMs) {
   cache.set(key, { data, ts: Date.now(), ttl: ttlMs });
 }
 
-// ── FETCH HELPERS ─────────────────────────────────────────────────────────────
+// ── FETCH HELPERS ──────────────────────────────────────────────
 async function polyFetch(path) {
   const sep = path.includes('?') ? '&' : '?';
   const res = await fetch(`https://api.polygon.io${path}${sep}apiKey=${POLYGON_KEY}`);
-  if (!res.ok) throw new Error(`Polygon ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`Polygon ${res.status}`);
   return res.json();
 }
 async function fmpFetch(path) {
   const sep = path.includes('?') ? '&' : '?';
   const res = await fetch(`https://financialmodelingprep.com/api/v3${path}${sep}apikey=${FMP_KEY}`);
-  if (!res.ok) throw new Error(`FMP ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`FMP ${res.status}`);
   return res.json();
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// ROUTE: GET /api/screener?tickers=AAPL,MSFT,NVDA
-// Returns: merged live price + fundamental data for all tickers
-// Cache: 5 minutes for prices, 24 hours for fundamentals
-// ═══════════════════════════════════════════════════════════════════════
+// ── ROUTES ─────────────────────────────────────────────────────
+
+// GET /api/screener?tickers=AAPL,MSFT
 app.get('/api/screener', async (req, res) => {
-  const tickers = (req.query.tickers || '')
-    .split(',')
-    .map(t => t.trim().toUpperCase())
-    .filter(Boolean)
-    .slice(0, 50);
-
+  const tickers = (req.query.tickers || '').split(',').map(t => t.trim().toUpperCase()).filter(Boolean).slice(0, 50);
   if (!tickers.length) return res.json([]);
-
   try {
-    // Fetch prices and fundamentals in parallel for all tickers
-    const results = await Promise.allSettled(
-      tickers.map(ticker => fetchMergedStock(ticker))
-    );
-
-    const stocks = results
-      .filter(r => r.status === 'fulfilled' && r.value)
-      .map(r => r.value);
-
+    const results = await Promise.allSettled(tickers.map(t => fetchMergedStock(t)));
+    const stocks = results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
     res.json(stocks);
   } catch (e) {
-    console.error('Screener error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════
-// ROUTE: GET /api/stock/:ticker
-// Returns: full merged data for one stock
-// ═══════════════════════════════════════════════════════════════════════
+// GET /api/stock/:ticker
 app.get('/api/stock/:ticker', async (req, res) => {
   const ticker = req.params.ticker.toUpperCase();
   try {
     const stock = await fetchMergedStock(ticker);
-    if (!stock) return res.status(404).json({ error: 'Stock not found' });
+    if (!stock) return res.status(404).json({ error: 'Not found' });
     res.json(stock);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════
-// ROUTE: GET /api/history/:ticker?from=YYYY-MM-DD&to=YYYY-MM-DD
-// Returns: daily closing prices for chart
-// ═══════════════════════════════════════════════════════════════════════
+// GET /api/history/:ticker
 app.get('/api/history/:ticker', async (req, res) => {
   const ticker = req.params.ticker.toUpperCase();
-  const to     = req.query.to   || today();
-  const from   = req.query.from || daysAgo(30);
+  const to   = req.query.to   || today();
+  const from = req.query.from || daysAgo(30);
   const cacheKey = `history-${ticker}-${from}-${to}`;
-
   const cached = getCache(cacheKey);
   if (cached) return res.json(cached);
-
   try {
-    const data = await polyFetch(
-      `/v2/aggs/ticker/${ticker}/range/1/day/${from}/${to}?adjusted=true&sort=asc&limit=500`
-    );
+    const data = await polyFetch(`/v2/aggs/ticker/${ticker}/range/1/day/${from}/${to}?adjusted=true&sort=asc&limit=500`);
     const prices = (data.results || []).map(r => ({
       date:  new Date(r.t).toISOString().split('T')[0],
       close: Math.round(r.c * 100) / 100,
-      open:  Math.round(r.o * 100) / 100,
-      high:  Math.round(r.h * 100) / 100,
-      low:   Math.round(r.l * 100) / 100,
-      vol:   r.v,
     }));
     const result = { ticker, prices };
-    setCache(cacheKey, result, 60 * 60 * 1000); // cache 1 hour
+    setCache(cacheKey, result, 60 * 60 * 1000);
     res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════
-// ROUTE: GET /api/search?q=apple
-// Returns: ticker search results
-// ═══════════════════════════════════════════════════════════════════════
+// GET /api/search?q=apple
 app.get('/api/search', async (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.json([]);
   try {
-    const data = await polyFetch(
-      `/v3/reference/tickers?search=${encodeURIComponent(q)}&active=true&market=stocks&limit=8`
-    );
-    const results = (data.results || []).map(r => ({
-      ticker:   r.ticker,
-      name:     r.name,
-      exchange: r.primary_exchange,
-    }));
-    res.json(results);
+    const data = await polyFetch(`/v3/reference/tickers?search=${encodeURIComponent(q)}&active=true&market=stocks&limit=8`);
+    res.json((data.results || []).map(r => ({ ticker: r.ticker, name: r.name, exchange: r.primary_exchange })));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════
-// ROUTE: GET /api/health
-// ═══════════════════════════════════════════════════════════════════════
+// ── AI ANALYSIS ROUTE (keeps Anthropic key safe on server) ─────
+// POST /api/analyze
+// Body: { ticker, name, sector, price, pe, eps, roe, divYield, beta,
+//         revGrowth, debtEq, week52High, week52Low, volumeM,
+//         momentum, timeframe, predBase, predBull, predBear,
+//         predConf, sentiment }
+app.post('/api/analyze', async (req, res) => {
+  if (!ANTHROPIC_KEY) {
+    return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured on server' });
+  }
+
+  const s = req.body;
+  if (!s.ticker) return res.status(400).json({ error: 'ticker required' });
+
+  const cacheKey = `ai-${s.ticker}-${s.timeframe}`;
+  const cached = getCache(cacheKey);
+  if (cached) return res.json(cached);
+
+  const prompt = `You are an institutional equity analyst. Analyze ${s.ticker} (${s.name}).
+
+Data: Sector: ${s.sector} | Price: $${s.price} | P/E: ${s.pe < 0 ? 'negative (loss-making)' : s.pe} | EPS: $${s.eps} | ROE: ${s.roe}% | Rev growth: ${s.revGrowth}% | Debt/Eq: ${s.debtEq}x | Div yield: ${s.divYield}% | Beta: ${s.beta} | 52W: $${s.week52Low}–$${s.week52High} | Volume: ${s.volumeM}M | Momentum: ${Math.round(s.momentum * 100)}/100
+Model target (${s.timeframe}): $${s.predBase} (${(((s.predBase - s.price) / s.price) * 100).toFixed(1)}%) | Bull: $${s.predBull} | Bear: $${s.predBear} | Confidence: ${s.predConf}% | Sentiment: ${s.sentiment}
+
+Respond ONLY with valid JSON, no markdown, no extra text:
+{"paragraphs":["Business model and current market positioning (2-3 sentences)","Key strengths and risks from the specific metrics (2-3 sentences)","Outlook for the ${s.timeframe} timeframe with specific price drivers (2-3 sentences)"],"scores":{"value":<0-100>,"growth":<0-100>,"risk":<0-100, higher means more risky>,"income":<0-100>,"momentum":<0-100>},"verdict":"One bold definitive verdict sentence."}`;
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 800,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error?.message || 'Anthropic error');
+
+    let text = (data.content || []).map(b => b.text || '').join('').trim().replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(text);
+    setCache(cacheKey, parsed, 60 * 60 * 1000); // cache 1 hour
+    res.json(parsed);
+  } catch (e) {
+    console.error('AI analysis error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/health
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    polygon: POLYGON_KEY ? 'configured' : 'missing',
-    fmp:     FMP_KEY     ? 'configured' : 'missing',
-    cached:  cache.size,
-    uptime:  Math.floor(process.uptime()) + 's',
+    polygon:   POLYGON_KEY   ? 'configured' : 'missing',
+    fmp:       FMP_KEY       ? 'configured' : 'missing',
+    anthropic: ANTHROPIC_KEY ? 'configured' : 'missing',
+    cached:    cache.size,
+    uptime:    Math.floor(process.uptime()) + 's',
   });
 });
 
-// ═══════════════════════════════════════════════════════════════════════
-// CORE: fetchMergedStock — gets price from Polygon + fundamentals from FMP
-// and merges them into the shape your screener expects
-// ═══════════════════════════════════════════════════════════════════════
+// ── STOCK DATA HELPERS ─────────────────────────────────────────
 async function fetchMergedStock(ticker) {
-  const [price, fundamentals] = await Promise.allSettled([
-    fetchPrice(ticker),
-    fetchFundamentals(ticker),
-  ]);
-
+  const [price, fundamentals] = await Promise.allSettled([fetchPrice(ticker), fetchFundamentals(ticker)]);
   const p = price.status === 'fulfilled' ? price.value : null;
   const f = fundamentals.status === 'fulfilled' ? fundamentals.value : {};
-
-  if (!p) return null; // skip if no price data
-
+  if (!p) return null;
   return {
     ticker,
-    name:        f.name        || ticker,
-    sector:      normalizeSector(f.sector || ''),
-    mcapVal:     f.mcapVal     || (p.price * (f.sharesOut || 1e9)) / 1e9,
-    price:       p.price,
-    change:      p.change,
-    volumeM:     p.volumeM,
-    open:        p.open,
-    high:        p.high,
-    low:         p.low,
-    // Fundamentals (FMP)
-    pe:          f.pe          ?? -1,
-    divYield:    f.divYield    ?? 0,
-    eps:         f.eps         ?? 0,
-    roe:         f.roe         ?? 0,
-    debtEq:      f.debtEq      ?? 0,
-    revGrowth:   f.revGrowth   ?? 0,
-    beta:        f.beta        ?? 1,
-    week52High:  f.week52High  || p.price * 1.1,
-    week52Low:   f.week52Low   || p.price * 0.9,
-    momentum:    calcMomentum(p.change, f.revGrowth, f.roe),
+    name:       f.name       || ticker,
+    sector:     normalizeSector(f.sector || ''),
+    mcapVal:    f.mcapVal    || 0,
+    price:      p.price,
+    change:     p.change,
+    volumeM:    p.volumeM,
+    open:       p.open,
+    high:       p.high,
+    low:        p.low,
+    pe:         f.pe         ?? -1,
+    divYield:   f.divYield   ?? 0,
+    eps:        f.eps        ?? 0,
+    roe:        f.roe        ?? 0,
+    debtEq:     f.debtEq     ?? 0,
+    revGrowth:  f.revGrowth  ?? 0,
+    beta:       f.beta       ?? 1,
+    week52High: f.week52High || p.price * 1.1,
+    week52Low:  f.week52Low  || p.price * 0.9,
+    momentum:   calcMomentum(p.change, f.revGrowth, f.roe),
   };
 }
 
-// ── Fetch price from Polygon ──────────────────────────────────────────────────
 async function fetchPrice(ticker) {
   const cacheKey = `price-${ticker}`;
   const cached = getCache(cacheKey);
   if (cached) return cached;
-
   const data = await polyFetch(`/v2/aggs/ticker/${ticker}/prev?adjusted=true`);
   const r = data.results?.[0];
   if (!r) return null;
-
   const result = {
     price:   Math.round(r.c * 100) / 100,
     change:  Math.round(((r.c - r.o) / r.o) * 10000) / 100,
@@ -224,22 +208,17 @@ async function fetchPrice(ticker) {
     high:    Math.round(r.h * 100) / 100,
     low:     Math.round(r.l * 100) / 100,
   };
-
-  setCache(cacheKey, result, 5 * 60 * 1000); // 5 min cache for prices
+  setCache(cacheKey, result, 5 * 60 * 1000);
   return result;
 }
 
-// ── Fetch fundamentals from FMP ───────────────────────────────────────────────
 async function fetchFundamentals(ticker) {
   const cacheKey = `fundamentals-${ticker}`;
   const cached = getCache(cacheKey);
   if (cached) return cached;
-
-  // FMP profile endpoint — gives us everything in one call
   const data = await fmpFetch(`/profile/${ticker}`);
   const r = data[0];
   if (!r) return {};
-
   const result = {
     name:       r.companyName,
     sector:     r.sector || '',
@@ -250,95 +229,52 @@ async function fetchFundamentals(ticker) {
     beta:       r.beta   ? Math.round(r.beta * 100) / 100 : 1,
     week52High: r['52WeekHigh'] || null,
     week52Low:  r['52WeekLow']  || null,
-    sharesOut:  r.sharesOutstanding || null,
-    // ROE and revenue growth need an extra call to financials endpoint
-    roe:        0,
-    debtEq:     0,
-    revGrowth:  0,
+    roe: 0, debtEq: 0, revGrowth: 0,
   };
-
-  // Optional: get ROE + debt/equity from key metrics (uses 1 more API call)
   try {
     const metrics = await fmpFetch(`/key-metrics-ttm/${ticker}`);
     const m = metrics[0];
     if (m) {
-      result.roe     = m.roeTTM     ? Math.round(m.roeTTM * 1000) / 10     : 0;
-      result.debtEq  = m.debtToEquityTTM ? Math.round(m.debtToEquityTTM * 100) / 100 : 0;
+      result.roe    = m.roeTTM            ? Math.round(m.roeTTM * 1000) / 10            : 0;
+      result.debtEq = m.debtToEquityTTM   ? Math.round(m.debtToEquityTTM * 100) / 100   : 0;
     }
-  } catch (e) {
-    console.log(`Key metrics unavailable for ${ticker}`);
-  }
-
-  // Optional: revenue growth from income statement
+  } catch (e) {}
   try {
     const income = await fmpFetch(`/income-statement/${ticker}?limit=2`);
     if (income.length >= 2) {
       const curr = income[0].revenue, prev = income[1].revenue;
-      if (prev && prev !== 0) {
-        result.revGrowth = Math.round(((curr - prev) / Math.abs(prev)) * 1000) / 10;
-      }
+      if (prev && prev !== 0) result.revGrowth = Math.round(((curr - prev) / Math.abs(prev)) * 1000) / 10;
     }
-  } catch (e) {
-    console.log(`Income statement unavailable for ${ticker}`);
-  }
-
-  setCache(cacheKey, result, 24 * 60 * 60 * 1000); // 24 hour cache for fundamentals
+  } catch (e) {}
+  setCache(cacheKey, result, 24 * 60 * 60 * 1000);
   return result;
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// HELPERS
-// ═══════════════════════════════════════════════════════════════════════
-
-// Normalize FMP sector names to match your screener's sector filter labels
 function normalizeSector(sector) {
   const map = {
-    'Technology':                   'Technology',
-    'Consumer Cyclical':            'Consumer',
-    'Consumer Defensive':           'Consumer',
-    'Healthcare':                   'Healthcare',
-    'Financial Services':           'Financials',
-    'Financials':                   'Financials',
-    'Energy':                       'Energy',
-    'Industrials':                  'Industrials',
-    'Utilities':                    'Utilities',
-    'Basic Materials':              'Industrials',
-    'Communication Services':       'Technology',
-    'Real Estate':                  'Financials',
+    'Technology': 'Technology', 'Consumer Cyclical': 'Consumer', 'Consumer Defensive': 'Consumer',
+    'Healthcare': 'Healthcare', 'Financial Services': 'Financials', 'Financials': 'Financials',
+    'Energy': 'Energy', 'Industrials': 'Industrials', 'Utilities': 'Utilities',
+    'Basic Materials': 'Industrials', 'Communication Services': 'Technology', 'Real Estate': 'Financials',
   };
   return map[sector] || sector || 'Other';
 }
-
-// Derive a 0–1 momentum score from available data
-// (replace with actual 12-month price return when you have it)
 function calcMomentum(changeToday, revGrowth, roe) {
   let score = 0.5;
-  if (changeToday >  2) score += 0.1;
+  if (changeToday > 2)  score += 0.1;
   if (changeToday < -2) score -= 0.1;
-  if (revGrowth   > 20) score += 0.15;
-  if (revGrowth   < -5) score -= 0.15;
-  if (roe         > 25) score += 0.1;
-  if (roe         < 0)  score -= 0.1;
+  if (revGrowth > 20)   score += 0.15;
+  if (revGrowth < -5)   score -= 0.15;
+  if (roe > 25)         score += 0.1;
+  if (roe < 0)          score -= 0.1;
   return Math.min(0.95, Math.max(0.05, Math.round(score * 100) / 100));
 }
-
-function today() {
-  return new Date().toISOString().split('T')[0];
-}
-function daysAgo(n) {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return d.toISOString().split('T')[0];
-}
+function today() { return new Date().toISOString().split('T')[0]; }
+function daysAgo(n) { const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().split('T')[0]; }
 
 app.listen(PORT, () => {
-  console.log(`\n🚀 ProScreen Data Server running on port ${PORT}`);
-  console.log(`📊 Polygon API: ${POLYGON_KEY ? '✅' : '❌ missing POLYGON_API_KEY'}`);
-  console.log(`📈 FMP API:     ${FMP_KEY     ? '✅' : '❌ missing FMP_API_KEY'}`);
-  console.log(`\nEndpoints:`);
-  console.log(`  GET /api/screener?tickers=AAPL,MSFT,NVDA`);
-  console.log(`  GET /api/stock/:ticker`);
-  console.log(`  GET /api/history/:ticker?from=YYYY-MM-DD&to=YYYY-MM-DD`);
-  console.log(`  GET /api/search?q=apple`);
-  console.log(`  GET /api/health\n`);
+  console.log(`\n🚀 ProScreen Server running on port ${PORT}`);
+  console.log(`📊 Polygon:   ${POLYGON_KEY   ? '✅' : '❌ missing'}`);
+  console.log(`📈 FMP:       ${FMP_KEY       ? '✅' : '❌ missing'}`);
+  console.log(`🤖 Anthropic: ${ANTHROPIC_KEY ? '✅' : '❌ missing'}`);
 });
