@@ -4,7 +4,7 @@
   "description": "ProScreen price alert server with email and SMS notifications",
   "main": "alert-server.js",
   "scripts": {
-    "start": "node alert-server.js",
+    "start": "node data-server.js",
     "dev": "node --watch alert-server.js"
   },
   "dependencies": {
