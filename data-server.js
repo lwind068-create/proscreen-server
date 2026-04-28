@@ -132,7 +132,7 @@ Respond ONLY with valid JSON, no markdown, no extra text:
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-5',
+        model: 'claude-sonnet-4-20250514',
         max_tokens: 800,
         messages: [{ role: 'user', content: prompt }],
       }),
@@ -151,38 +151,35 @@ Respond ONLY with valid JSON, no markdown, no extra text:
   }
 });
 
-// ── NEWS ROUTE ─────────────────────────────────────────────────
+// ── NEWS ROUTE (powered by FMP — better quality financial news) ─
 // GET /api/news/:ticker
-// Returns: real news articles with sentiment for a stock
-const NEWS_KEY = process.env.NEWS_API_KEY;
-
+// Returns: real financial news articles with sentiment for a stock
 app.get('/api/news/:ticker', async (req, res) => {
   const ticker = req.params.ticker.toUpperCase();
   const cacheKey = `news-${ticker}`;
   const cached = getCache(cacheKey);
   if (cached) return res.json(cached);
 
-  if (!NEWS_KEY) return res.status(500).json({ error: 'NEWS_API_KEY not configured' });
+  if (!FMP_KEY) return res.status(500).json({ error: 'FMP_API_KEY not configured' });
 
   try {
-    // Search for news about the ticker/company
-    const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(ticker)}&language=en&sortBy=publishedAt&pageSize=5&apiKey=${NEWS_KEY}`;
-    const response = await fetch(url);
-    const data = await response.json();
+    // FMP stock news endpoint — returns finance-specific news for the ticker
+    const data = await fmpFetch(`/stock_news?tickers=${ticker}&limit=5`);
 
-    if (data.status !== 'ok') throw new Error(data.message || 'NewsAPI error');
+    if (!Array.isArray(data)) throw new Error('Invalid response from FMP news');
 
-    const articles = (data.articles || []).slice(0, 4).map(a => {
-      // Simple sentiment detection based on keywords in title/description
-      const text = ((a.title || '') + ' ' + (a.description || '')).toLowerCase();
-      const positiveWords = ['surge', 'soar', 'gain', 'rise', 'beat', 'record', 'growth', 'profit', 'up', 'high', 'strong', 'buy', 'upgrade', 'bullish', 'positive', 'boost', 'rally', 'jump'];
-      const negativeWords = ['fall', 'drop', 'decline', 'miss', 'lose', 'low', 'weak', 'sell', 'downgrade', 'bearish', 'negative', 'crash', 'plunge', 'concern', 'risk', 'cut', 'warn', 'probe', 'fine', 'lawsuit'];
+    const positiveWords = ['surge', 'soar', 'gain', 'rise', 'beat', 'record', 'growth', 'profit', 'strong', 'buy', 'upgrade', 'bullish', 'boost', 'rally', 'jump', 'outperform', 'exceed', 'positive'];
+    const negativeWords = ['fall', 'drop', 'decline', 'miss', 'lose', 'weak', 'sell', 'downgrade', 'bearish', 'crash', 'plunge', 'concern', 'risk', 'cut', 'warn', 'probe', 'fine', 'lawsuit', 'negative', 'below'];
+
+    const articles = data.slice(0, 4).map(a => {
+      // Sentiment detection on headline + summary
+      const text = ((a.title || '') + ' ' + (a.text || '')).toLowerCase();
       const posScore = positiveWords.filter(w => text.includes(w)).length;
       const negScore = negativeWords.filter(w => text.includes(w)).length;
       const sentiment = posScore > negScore ? 'positive' : negScore > posScore ? 'negative' : 'neutral';
 
       // Format time ago
-      const published = new Date(a.publishedAt);
+      const published = new Date(a.publishedDate);
       const now = new Date();
       const diffMs = now - published;
       const diffMins = Math.floor(diffMs / 60000);
@@ -193,11 +190,15 @@ app.get('/api/news/:ticker', async (req, res) => {
       else if (diffHours < 24) timeAgo = `${diffHours}h ago`;
       else timeAgo = `${diffDays}d ago`;
 
+      // Truncate summary to 150 chars
+      const summary = a.text ? (a.text.length > 150 ? a.text.substring(0, 150) + '...' : a.text) : '';
+
       return {
-        headline: a.title || '',
-        summary:  a.description || '',
-        source:   a.source?.name || 'Unknown',
-        url:      a.url || '#',
+        headline: a.title   || '',
+        summary,
+        source:   a.site    || 'Financial News',
+        url:      a.url     || '#',
+        image:    a.image   || null,
         time:     timeAgo,
         sentiment,
       };
@@ -219,7 +220,7 @@ app.get('/api/health', (req, res) => {
     polygon:   POLYGON_KEY   ? 'configured' : 'missing',
     fmp:       FMP_KEY       ? 'configured' : 'missing',
     anthropic: ANTHROPIC_KEY ? 'configured' : 'missing',
-    news:      NEWS_KEY      ? 'configured' : 'missing',
+    news:      FMP_KEY       ? 'configured (via FMP)' : 'missing',
     cached:    cache.size,
     uptime:    Math.floor(process.uptime()) + 's',
   });
