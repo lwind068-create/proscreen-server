@@ -139,7 +139,10 @@ async function fetchFundamentals(ticker) {
     const res = await fetch(`https://financialmodelingprep.com/stable/key-metrics-ttm?symbol=${ticker}&apikey=${FMP_KEY}`);
     const data = await res.json();
     const m = Array.isArray(data) ? data[0] : data;
-    if (m) { result.roe = m.roeTTM ? Math.round(m.roeTTM * 1000) / 10 : 0; result.debtEq = m.debtToEquityTTM ? Math.round(m.debtToEquityTTM * 100) / 100 : 0; }
+    if (m) {
+      const de = m.debtToEquityTTM ?? m.debtEquityRatioTTM ?? m.debtToEquity ?? null;
+      if (de != null) result.debtEq = Math.round(de * 100) / 100;
+    }
   } catch (e) { console.log(`Key metrics failed for ${ticker}: ${e.message}`); }
   try {
     const res = await fetch(`https://financialmodelingprep.com/stable/ratios-ttm?symbol=${ticker}&apikey=${FMP_KEY}`);
@@ -151,7 +154,11 @@ async function fetchFundamentals(ticker) {
       if (r.debtToEquityRatioTTM) result.debtEq = Math.round(r.debtToEquityRatioTTM * 100) / 100;
       if (r.dividendYieldTTM) result.divYield = Math.round(r.dividendYieldTTM * 10000) / 100;
       if (r.netProfitMarginTTM) result.profitMargin = Math.round(r.netProfitMarginTTM * 1000) / 10;
-      if (r.returnOnEquityTTM) result.roe = Math.round(r.returnOnEquityTTM * 1000) / 10;
+      // ROE = Net Income Per Share / Shareholders Equity Per Share * 100
+      // FMP doesn't have a direct ROE field — calculate it from available data
+      if (r.netIncomePerShareTTM && r.shareholdersEquityPerShareTTM && r.shareholdersEquityPerShareTTM !== 0) {
+        result.roe = Math.round((r.netIncomePerShareTTM / r.shareholdersEquityPerShareTTM) * 1000) / 10;
+      }
     }
   } catch (e) { console.log(`Ratios failed for ${ticker}: ${e.message}`); }
   try {
