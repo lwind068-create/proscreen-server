@@ -304,15 +304,28 @@ async function fetchFundamentals(ticker) {
     const data = await res.json();
     const r = Array.isArray(data) ? data[0] : data;
     if (r && r.companyName) {
+      // Parse 52W range from "193.25-288.62" format
+      let week52High = null, week52Low = null;
+      if (r.range) {
+        const parts = r.range.split('-');
+        if (parts.length === 2) {
+          week52Low  = parseFloat(parts[0]);
+          week52High = parseFloat(parts[1]);
+        }
+      }
+      // Calculate div yield from lastDividend
+      const divYield = r.lastDividend && r.price
+        ? Math.round((r.lastDividend / r.price) * 100 * 10) / 10
+        : 0;
       result.name       = r.companyName;
-      result.sector     = r.sector || '';
-      result.mcapVal    = r.mktCap ? Math.round(r.mktCap / 1e9) : null;
-      result.pe         = r.pe     ? Math.round(r.pe * 10) / 10 : -1;
-      result.eps        = r.eps    ? Math.round(r.eps * 100) / 100 : 0;
-      result.divYield   = r.lastDiv ? Math.round((r.lastDiv / r.price) * 4 * 1000) / 10 : 0;
-      result.beta       = r.beta   ? Math.round(r.beta * 100) / 100 : 1;
-      result.week52High = r['52WeekHigh'] || null;
-      result.week52Low  = r['52WeekLow']  || null;
+      result.sector     = r.sector || r.industry || '';
+      result.mcapVal    = r.marketCap ? Math.round(r.marketCap / 1e9) : null;
+      result.pe         = r.pe       ? Math.round(r.pe * 10) / 10     : -1;
+      result.eps        = r.eps      ? Math.round(r.eps * 100) / 100   : 0;
+      result.divYield   = divYield;
+      result.beta       = r.beta     ? Math.round(r.beta * 100) / 100  : 1;
+      result.week52High = week52High;
+      result.week52Low  = week52Low;
     }
   } catch(e) {
     // Try v3 fallback
