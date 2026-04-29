@@ -70,6 +70,17 @@ async function fetchFundamentals(ticker) {
     if (m) { result.roe = m.roeTTM ? Math.round(m.roeTTM * 1000) / 10 : 0; result.debtEq = m.debtToEquityTTM ? Math.round(m.debtToEquityTTM * 100) / 100 : 0; }
   } catch (e) { console.log(`Key metrics failed for ${ticker}: ${e.message}`); }
   try {
+    const res = await fetch(`https://financialmodelingprep.com/stable/ratios-ttm?symbol=${ticker}&apikey=${FMP_KEY}`);
+    const data = await res.json();
+    const r = Array.isArray(data) ? data[0] : data;
+    if (r) {
+      if (r.priceToEarningsRatioTTM && r.priceToEarningsRatioTTM > 0) result.pe = Math.round(r.priceToEarningsRatioTTM * 10) / 10;
+      if (r.netIncomePerShareTTM) result.eps = Math.round(r.netIncomePerShareTTM * 100) / 100;
+      if (r.debtToEquityRatioTTM) result.debtEq = Math.round(r.debtToEquityRatioTTM * 100) / 100;
+      if (r.dividendYieldTTM) result.divYield = Math.round(r.dividendYieldTTM * 10000) / 100;
+    }
+  } catch (e) { console.log(`Ratios failed for ${ticker}: ${e.message}`); }
+  try {
     const res = await fetch(`https://financialmodelingprep.com/stable/income-statement?symbol=${ticker}&limit=2&apikey=${FMP_KEY}`);
     const income = await res.json();
     const arr = Array.isArray(income) ? income : [];
