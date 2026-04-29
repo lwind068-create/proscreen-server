@@ -30,10 +30,33 @@ async function polyFetch(path) {
   return res.json();
 }
 async function fmpFetch(path) {
+  // Try new /stable/ endpoint first (for new accounts)
+  // Fall back to /api/v3/ for legacy
   const sep = path.includes('?') ? '&' : '?';
-  const res = await fetch(`https://financialmodelingprep.com/api/v3${path}${sep}apikey=${FMP_KEY}`);
+  const stableBase = 'https://financialmodelingprep.com/stable';
+  const v3Base     = 'https://financialmodelingprep.com/api/v3';
+
+  // Map old v3 paths to new stable paths
+  const stablePath = path
+    .replace('/profile/', '/profile?symbol=')
+    .replace('/key-metrics-ttm/', '/key-metrics-ttm?symbol=')
+    .replace('/income-statement/', '/income-statement?symbol=')
+    .replace('/quote/', '/quote?symbol=');
+
+  try {
+    const res = await fetch(`${stableBase}${stablePath}${sep}apikey=${FMP_KEY}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && !data['Error Message'] && !(typeof data === 'string')) return data;
+    }
+  } catch (e) {}
+
+  // Fall back to v3
+  const res = await fetch(`${v3Base}${path}${sep}apikey=${FMP_KEY}`);
   if (!res.ok) throw new Error(`FMP ${res.status}`);
-  return res.json();
+  const data = await res.json();
+  if (data?.['Error Message']) throw new Error(data['Error Message']);
+  return data;
 }
 
 // ── ROUTES ─────────────────────────────────────────────────────
@@ -272,36 +295,66 @@ async function fetchFundamentals(ticker) {
   const cacheKey = `fundamentals-${ticker}`;
   const cached = getCache(cacheKey);
   if (cached) return cached;
-  const data = await fmpFetch(`/profile/${ticker}`);
-  const r = data[0];
-  if (!r) return {};
-  const result = {
-    name:       r.companyName,
-    sector:     r.sector || '',
-    mcapVal:    r.mktCap ? Math.round(r.mktCap / 1e9) : null,
-    pe:         r.pe     ? Math.round(r.pe * 10) / 10 : -1,
-    eps:        r.eps    ? Math.round(r.eps * 100) / 100 : 0,
-    divYield:   r.lastDiv ? Math.round((r.lastDiv / r.price) * 4 * 1000) / 10 : 0,
-    beta:       r.beta   ? Math.round(r.beta * 100) / 100 : 1,
-    week52High: r['52WeekHigh'] || null,
-    week52Low:  r['52WeekLow']  || null,
-    roe: 0, debtEq: 0, revGrowth: 0,
-  };
+
+  const result = { roe: 0, debtEq: 0, revGrowth: 0 };
+
+  // Try new /stable/ endpoint first
   try {
-    const metrics = await fmpFetch(`/key-metrics-ttm/${ticker}`);
-    const m = metrics[0];
-    if (m) {
-      result.roe    = m.roeTTM            ? Math.round(m.roeTTM * 1000) / 10            : 0;
-      result.debtEq = m.debtToEquityTTM   ? Math.round(m.debtToEquityTTM * 100) / 100   : 0;
+    const res = await fetch(`https://financialmodelingprep.com/stable/profile?symbol=${ticker}&apikey=${FMP_KEY}`);
+    const data = await res.json();
+    const r = Array.isArray(data) ? data[0] : data;
+    if (r && r.companyName) {
+      result.name       = r.companyName;
+      result.sector     = r.sector || '';
+      result.mcapVal    = r.mktCap ? Math.round(r.mktCap / 1e9) : null;
+      result.pe         = r.pe     ? Math.round(r.pe * 10) / 10 : -1;
+      result.eps        = r.eps    ? Math.round(r.eps * 100) / 100 : 0;
+      result.divYield   = r.lastDiv ? Math.round((r.lastDiv / r.price) * 4 * 1000) / 10 : 0;
+      result.beta       = r.beta   ? Math.round(r.beta * 100) / 100 : 1;
+      result.week52High = r['52WeekHigh'] || null;
+      result.week52Low  = r['52WeekLow']  || null;
     }
-  } catch (e) {}
+  } catch(e) {
+    // Try v3 fallback
+    try {
+      const data = await fmpFetch(`/profile/${ticker}`);
+      const r = Array.isArray(data) ? data[0] : data;
+      if (r && r.companyName) {
+        result.name       = r.companyName;
+        result.sector     = r.sector || '';
+        result.mcapVal    = r.mktCap ? Math.round(r.mktCap / 1e9) : null;
+        result.pe         = r.pe     ? Math.round(r.pe * 10) / 10 : -1;
+        result.eps        = r.eps    ? Math.round(r.eps * 100) / 100 : 0;
+        result.divYield   = r.lastDiv ? Math.round((r.lastDiv / r.price) * 4 * 1000) / 10 : 0;
+        result.beta       = r.beta   ? Math.round(r.beta * 100) / 100 : 1;
+        result.week52High = r['52WeekHigh'] || null;
+        result.week52Low  = r['52WeekLow']  || null;
+      }
+    } catch(e2) { console.log(`Profile fetch failed for ${ticker}: ${e2.message}`); }
+  }
+
+  // Key metrics
   try {
-    const income = await fmpFetch(`/income-statement/${ticker}?limit=2`);
+    const res = await fetch(`https://financialmodelingprep.com/stable/key-metrics-ttm?symbol=${ticker}&apikey=${FMP_KEY}`);
+    const data = await res.json();
+    const m = Array.isArray(data) ? data[0] : data;
+    if (m) {
+      result.roe    = m.roeTTM          ? Math.round(m.roeTTM * 1000) / 10          : 0;
+      result.debtEq = m.debtToEquityTTM ? Math.round(m.debtToEquityTTM * 100) / 100 : 0;
+    }
+  } catch(e) { console.log(`Key metrics failed for ${ticker}`); }
+
+  // Revenue growth
+  try {
+    const res = await fetch(`https://financialmodelingprep.com/stable/income-statement?symbol=${ticker}&limit=2&apikey=${FMP_KEY}`);
+    const data = await res.json();
+    const income = Array.isArray(data) ? data : [];
     if (income.length >= 2) {
       const curr = income[0].revenue, prev = income[1].revenue;
       if (prev && prev !== 0) result.revGrowth = Math.round(((curr - prev) / Math.abs(prev)) * 1000) / 10;
     }
-  } catch (e) {}
+  } catch(e) { console.log(`Income statement failed for ${ticker}`); }
+
   setCache(cacheKey, result, 24 * 60 * 60 * 1000);
   return result;
 }
