@@ -107,7 +107,35 @@ app.get('/api/sector-performance', async (req, res) => {
 
 async function fetchMergedStock(ticker) { const [pr, fr] = await Promise.allSettled([fetchPrice(ticker), fetchFundamentals(ticker)]); const p = pr.status === 'fulfilled' ? pr.value : null; const f = fr.status === 'fulfilled' ? fr.value : {}; if (!p) return null; return { ticker, name: f.name || ticker, sector: normalizeSector(f.sector || ''), mcapVal: f.mcapVal || 0, price: p.price, change: p.change, volumeM: p.volumeM, open: p.open, high: p.high, low: p.low, pe: f.pe != null ? f.pe : -1, divYield: f.divYield || 0, eps: f.eps || 0, profitMargin: f.profitMargin || 0, roe: f.roe || 0, debtEq: f.debtEq || 0, revGrowth: f.revGrowth || 0, beta: f.beta || 1, week52High: f.week52High || p.price * 1.1, week52Low: f.week52Low || p.price * 0.9, momentum: calcMomentum(p.change, f.revGrowth || 0, f.profitMargin || 0) }; }
 
-async function fetchPrice(ticker) { const cacheKey = `price-${ticker}`; const cached = getCache(cacheKey); if (cached) return cached; const data = await polyFetch(`/v2/aggs/ticker/${ticker}/prev?adjusted=true`); const r = data.results && data.results[0]; if (!r) return null; const result = { price: Math.round(r.c * 100) / 100, change: Math.round(((r.c - r.o) / r.o) * 10000) / 100, volumeM: Math.round(r.v / 1e5) / 10, open: Math.round(r.o * 100) / 100, high: Math.round(r.h * 100) / 100, low: Math.round(r.l * 100) / 100 }; setCache(cacheKey, result, 5 * 60 * 1000); return result; }
+async function fetchPrice(ticker) {
+  const cacheKey = `price-${ticker}`;
+  const cached = getCache(cacheKey);
+  if (cached) return cached;
+  // Try snapshot first for today's current price
+  try {
+    const snap = await polyFetch(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
+    const t = snap.ticker;
+    if (t && t.day && t.day.c) {
+      const result = {
+        price:   Math.round((t.lastTrade?.p || t.day.c) * 100) / 100,
+        change:  Math.round((t.todaysChangePerc || 0) * 100) / 100,
+        volumeM: Math.round((t.day.v || 0) / 1e5) / 10,
+        open:    Math.round((t.day.o || t.day.c) * 100) / 100,
+        high:    Math.round((t.day.h || t.day.c) * 100) / 100,
+        low:     Math.round((t.day.l || t.day.c) * 100) / 100
+      };
+      setCache(cacheKey, result, 60 * 1000); // 1 min cache for live prices
+      return result;
+    }
+  } catch(e) {}
+  // Fall back to previous day close
+  const data = await polyFetch(`/v2/aggs/ticker/${ticker}/prev?adjusted=true`);
+  const r = data.results && data.results[0];
+  if (!r) return null;
+  const result = { price: Math.round(r.c * 100) / 100, change: Math.round(((r.c - r.o) / r.o) * 10000) / 100, volumeM: Math.round(r.v / 1e5) / 10, open: Math.round(r.o * 100) / 100, high: Math.round(r.h * 100) / 100, low: Math.round(r.l * 100) / 100 };
+  setCache(cacheKey, result, 5 * 60 * 1000);
+  return result;
+}
 
 async function fetchFundamentals(ticker) {
   const cacheKey = `fundamentals-${ticker}`;
