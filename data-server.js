@@ -287,3 +287,38 @@ app.post('/api/chat', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// Email alerts via Resend
+app.post('/api/alert-email', async (req, res) => {
+  const { to, ticker, condition, price } = req.body;
+  if (!to || !ticker) return res.status(400).json({ error: 'Missing fields' });
+  const key = process.env.RESEND_API_KEY;
+  if (!key) return res.status(500).json({ error: 'RESEND_API_KEY not set' });
+  try {
+    const r = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: 'ProScreen Alerts <onboarding@resend.dev>',
+        to: [to],
+        subject: `🔔 Alert Triggered: ${ticker}`,
+        html: `<div style="font-family:system-ui,sans-serif;max-width:500px;margin:0 auto;padding:24px;">
+          <h2 style="color:#e8b84b;">🔔 ProScreen Alert Triggered</h2>
+          <p>Your alert for <strong>${ticker}</strong> has triggered.</p>
+          <div style="background:#f7f6f3;border-radius:8px;padding:16px;margin:16px 0;">
+            <div style="font-size:22px;font-weight:600;">${ticker}</div>
+            <div style="color:#666;margin:4px 0;">${condition}</div>
+            <div style="font-size:28px;font-weight:700;color:#e8b84b;">$${price}</div>
+          </div>
+          <p style="color:#999;font-size:11px;">ProScreen Professional · Automated alert. Not financial advice.</p>
+        </div>`
+      })
+    });
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: data.message });
+    res.json({ success: true });
+  } catch(e) {
+    console.error('Alert email error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
