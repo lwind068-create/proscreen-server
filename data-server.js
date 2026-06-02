@@ -111,30 +111,37 @@ async function fetchPrice(ticker) {
   const cacheKey = `price-${ticker}`;
   const cached = getCache(cacheKey);
   if (cached) return cached;
-  // Try snapshot first for today's current price
+
+  // Try today's aggregate first (updates intraday with 15min delay on free tier)
   try {
-    const snap = await polyFetch(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
-    const t = snap.ticker;
-    if (t && t.day && t.day.c) {
+    const todayStr = today();
+    const data = await polyFetch(`/v2/aggs/ticker/${ticker}/range/1/day/${todayStr}/${todayStr}?adjusted=true`);
+    const r = data.results && data.results[0];
+    if (r && r.c && r.c > 0) {
       const result = {
-        price:   Math.round((t.lastTrade?.p || t.day.c) * 100) / 100,
-        change:  Math.round((t.todaysChangePerc || 0) * 100) / 100,
-        volumeM: Math.round((t.day.v || 0) / 1e5) / 10,
-        open:    Math.round((t.day.o || t.day.c) * 100) / 100,
-        high:    Math.round((t.day.h || t.day.c) * 100) / 100,
-        low:     Math.round((t.day.l || t.day.c) * 100) / 100
+        price:   Math.round(r.c * 100) / 100,
+        change:  Math.round(((r.c - r.o) / r.o) * 10000) / 100,
+        volumeM: Math.round(r.v / 1e5) / 10,
+        open:    Math.round(r.o * 100) / 100,
+        high:    Math.round(r.h * 100) / 100,
+        low:     Math.round(r.l * 100) / 100
       };
-      setCache(cacheKey, result, 60 * 1000); // 1 min cache for live prices
+      setCache(cacheKey, result, 60 * 1000);
       return result;
     }
   } catch(e) {}
-  // Fall back to previous day close
-  const data = await polyFetch(`/v2/aggs/ticker/${ticker}/prev?adjusted=true`);
-  const r = data.results && data.results[0];
-  if (!r) return null;
-  const result = { price: Math.round(r.c * 100) / 100, change: Math.round(((r.c - r.o) / r.o) * 10000) / 100, volumeM: Math.round(r.v / 1e5) / 10, open: Math.round(r.o * 100) / 100, high: Math.round(r.h * 100) / 100, low: Math.round(r.l * 100) / 100 };
-  setCache(cacheKey, result, 5 * 60 * 1000);
-  return result;
+
+  // Fall back to previous day close (e.g. pre-market or weekend)
+  try {
+    const data = await polyFetch(`/v2/aggs/ticker/${ticker}/prev?adjusted=true`);
+    const r = data.results && data.results[0];
+    if (r) {
+      const result = { price: Math.round(r.c * 100) / 100, change: Math.round(((r.c - r.o) / r.o) * 10000) / 100, volumeM: Math.round(r.v / 1e5) / 10, open: Math.round(r.o * 100) / 100, high: Math.round(r.h * 100) / 100, low: Math.round(r.l * 100) / 100 };
+      setCache(cacheKey, result, 5 * 60 * 1000);
+      return result;
+    }
+  } catch(e) {}
+  return null;
 }
 
 async function fetchFundamentals(ticker) {
