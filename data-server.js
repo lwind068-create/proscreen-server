@@ -112,26 +112,33 @@ async function fetchPrice(ticker) {
   const cached = getCache(cacheKey);
   if (cached) return cached;
 
-  // Try today's aggregate first (updates intraday with 15min delay on free tier)
+  // Use snapshot for live intraday price (works on Polygon paid plans)
   try {
-    const todayStr = today();
-    const data = await polyFetch(`/v2/aggs/ticker/${ticker}/range/1/day/${todayStr}/${todayStr}?adjusted=true`);
-    const r = data.results && data.results[0];
-    if (r && r.c && r.c > 0) {
-      const result = {
-        price:   Math.round(r.c * 100) / 100,
-        change:  Math.round(((r.c - r.o) / r.o) * 10000) / 100,
-        volumeM: Math.round(r.v / 1e5) / 10,
-        open:    Math.round(r.o * 100) / 100,
-        high:    Math.round(r.h * 100) / 100,
-        low:     Math.round(r.l * 100) / 100
-      };
-      setCache(cacheKey, result, 60 * 1000);
-      return result;
+    const snap = await polyFetch(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
+    const t = snap.ticker;
+    if (t) {
+      // lastTrade.p = most recent trade price (live/delayed depending on plan)
+      // day.c = current session close, day.o = open
+      const price  = t.lastTrade?.p || t.day?.c || t.prevDay?.c;
+      const open   = t.day?.o || t.prevDay?.o || price;
+      const change = t.todaysChangePerc != null ? Math.round(t.todaysChangePerc * 100) / 100
+                   : (open ? Math.round(((price - open) / open) * 10000) / 100 : 0);
+      if (price && price > 0) {
+        const result = {
+          price:   Math.round(price * 100) / 100,
+          change,
+          volumeM: Math.round((t.day?.v || t.prevDay?.v || 0) / 1e5) / 10,
+          open:    Math.round(open * 100) / 100,
+          high:    Math.round((t.day?.h || t.prevDay?.h || price) * 100) / 100,
+          low:     Math.round((t.day?.l || t.prevDay?.l || price) * 100) / 100
+        };
+        setCache(cacheKey, result, 60 * 1000);
+        return result;
+      }
     }
-  } catch(e) {}
+  } catch(e) { console.error(`Snapshot error ${ticker}:`, e.message); }
 
-  // Fall back to previous day close (e.g. pre-market or weekend)
+  // Fall back to previous day close
   try {
     const data = await polyFetch(`/v2/aggs/ticker/${ticker}/prev?adjusted=true`);
     const r = data.results && data.results[0];
