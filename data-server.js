@@ -23,11 +23,12 @@ app.get('/api/health', (req, res) => { res.json({ status: 'ok', polygon: POLYGON
 
 app.get('/api/debug/price/:ticker', async (req, res) => {
   const ticker = req.params.ticker.toUpperCase();
-  const todayStr = today();
   const results = {};
-  try { results.minute = await polyFetch(`/v2/aggs/ticker/${ticker}/range/1/minute/${todayStr}/${todayStr}?adjusted=true&sort=desc&limit=1`); } catch(e) { results.minute = { error: e.message }; }
-  try { results.day   = await polyFetch(`/v2/aggs/ticker/${ticker}/range/1/day/${todayStr}/${todayStr}?adjusted=true`); } catch(e) { results.day = { error: e.message }; }
-  try { results.prev  = await polyFetch(`/v2/aggs/ticker/${ticker}/prev?adjusted=true`); } catch(e) { results.prev = { error: e.message }; }
+  try {
+    const r = await fetch(`https://financialmodelingprep.com/stable/quote?symbol=${ticker}&apikey=${FMP_KEY}`);
+    results.fmp_quote = await r.json();
+  } catch(e) { results.fmp_quote = { error: e.message }; }
+  try { results.poly_prev = await polyFetch(`/v2/aggs/ticker/${ticker}/prev?adjusted=true`); } catch(e) { results.poly_prev = { error: e.message }; }
   res.json(results);
 });
 
@@ -122,33 +123,28 @@ async function fetchPrice(ticker) {
   const cached = getCache(cacheKey);
   if (cached) return cached;
 
-  // Use today's minute bars for current price (works on Polygon Starter plan)
+  // Use FMP quote for live price — avoids Polygon rate limiting
   try {
-    const todayStr = today();
-    const now = new Date().toISOString();
-    const data = await polyFetch(`/v2/aggs/ticker/${ticker}/range/1/minute/${todayStr}/${todayStr}?adjusted=true&sort=desc&limit=1`);
-    const r = data.results && data.results[0];
-    if (r && r.c > 0) {
-      // Get today's open from daily bar for accurate change %
-      let open = r.o;
-      try {
-        const day = await polyFetch(`/v2/aggs/ticker/${ticker}/range/1/day/${todayStr}/${todayStr}?adjusted=true`);
-        if (day.results && day.results[0]) open = day.results[0].o;
-      } catch(e) {}
-      const result = {
-        price:   Math.round(r.c * 100) / 100,
-        change:  open ? Math.round(((r.c - open) / open) * 10000) / 100 : 0,
-        volumeM: Math.round((r.v || 0) / 1e5) / 10,
-        open:    Math.round(open * 100) / 100,
-        high:    Math.round(r.h * 100) / 100,
-        low:     Math.round(r.l * 100) / 100
-      };
-      setCache(cacheKey, result, 60 * 1000);
-      return result;
+    const res = await fetch(`https://financialmodelingprep.com/stable/quote?symbol=${ticker}&apikey=${FMP_KEY}`);
+    if (res.ok) {
+      const data = await res.json();
+      const q = Array.isArray(data) ? data[0] : data;
+      if (q && q.price > 0) {
+        const result = {
+          price:   Math.round(q.price * 100) / 100,
+          change:  Math.round((q.changesPercentage || 0) * 100) / 100,
+          volumeM: Math.round((q.volume || 0) / 1e5) / 10,
+          open:    Math.round((q.open || q.price) * 100) / 100,
+          high:    Math.round((q.dayHigh || q.price) * 100) / 100,
+          low:     Math.round((q.dayLow || q.price) * 100) / 100
+        };
+        setCache(cacheKey, result, 60 * 1000);
+        return result;
+      }
     }
-  } catch(e) { console.error(`Minute bar error ${ticker}:`, e.message); }
+  } catch(e) { console.error(`FMP quote error ${ticker}:`, e.message); }
 
-  // Fall back to previous day close
+  // Fall back to Polygon prev day
   try {
     const data = await polyFetch(`/v2/aggs/ticker/${ticker}/prev?adjusted=true`);
     const r = data.results && data.results[0];
