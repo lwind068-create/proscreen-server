@@ -21,6 +21,15 @@ async function polyFetch(path) { const sep = path.includes('?') ? '&' : '?'; con
 
 app.get('/api/health', (req, res) => { res.json({ status: 'ok', polygon: POLYGON_KEY ? 'configured' : 'missing', fmp: FMP_KEY ? 'configured' : 'missing', anthropic: ANTHROPIC_KEY ? 'configured' : 'missing', news: NEWS_KEY ? 'configured' : 'missing', cached: cache.size, uptime: Math.floor(process.uptime()) + 's' }); });
 
+app.get('/api/debug/price/:ticker', async (req, res) => {
+  const ticker = req.params.ticker.toUpperCase();
+  try {
+    const snap = await polyFetch(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
+    const prev = await polyFetch(`/v2/aggs/ticker/${ticker}/prev?adjusted=true`);
+    res.json({ snapshot: snap, prev: prev });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/screener', async (req, res) => { const tickers = (req.query.tickers || '').split(',').map(t => t.trim().toUpperCase()).filter(Boolean).slice(0, 50); if (!tickers.length) return res.json([]); try { const results = await Promise.allSettled(tickers.map(t => fetchMergedStock(t))); res.json(results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value)); } catch (e) { res.status(500).json({ error: e.message }); } });
 
 app.get('/api/stock/:ticker', async (req, res) => { const ticker = req.params.ticker.toUpperCase(); try { const stock = await fetchMergedStock(ticker); if (!stock) return res.status(404).json({ error: 'Not found' }); res.json(stock); } catch (e) { res.status(500).json({ error: e.message }); } });
