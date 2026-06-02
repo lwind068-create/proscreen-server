@@ -23,11 +23,12 @@ app.get('/api/health', (req, res) => { res.json({ status: 'ok', polygon: POLYGON
 
 app.get('/api/debug/price/:ticker', async (req, res) => {
   const ticker = req.params.ticker.toUpperCase();
-  try {
-    const snap = await polyFetch(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
-    const prev = await polyFetch(`/v2/aggs/ticker/${ticker}/prev?adjusted=true`);
-    res.json({ snapshot: snap, prev: prev });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  const todayStr = today();
+  const results = {};
+  try { results.minute = await polyFetch(`/v2/aggs/ticker/${ticker}/range/1/minute/${todayStr}/${todayStr}?adjusted=true&sort=desc&limit=1`); } catch(e) { results.minute = { error: e.message }; }
+  try { results.day   = await polyFetch(`/v2/aggs/ticker/${ticker}/range/1/day/${todayStr}/${todayStr}?adjusted=true`); } catch(e) { results.day = { error: e.message }; }
+  try { results.prev  = await polyFetch(`/v2/aggs/ticker/${ticker}/prev?adjusted=true`); } catch(e) { results.prev = { error: e.message }; }
+  res.json(results);
 });
 
 app.get('/api/screener', async (req, res) => { const tickers = (req.query.tickers || '').split(',').map(t => t.trim().toUpperCase()).filter(Boolean).slice(0, 50); if (!tickers.length) return res.json([]); try { const results = await Promise.allSettled(tickers.map(t => fetchMergedStock(t))); res.json(results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value)); } catch (e) { res.status(500).json({ error: e.message }); } });
@@ -121,31 +122,31 @@ async function fetchPrice(ticker) {
   const cached = getCache(cacheKey);
   if (cached) return cached;
 
-  // Use snapshot for live intraday price (works on Polygon paid plans)
+  // Use today's minute bars for current price (works on Polygon Starter plan)
   try {
-    const snap = await polyFetch(`/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}`);
-    const t = snap.ticker;
-    if (t) {
-      // lastTrade.p = most recent trade price (live/delayed depending on plan)
-      // day.c = current session close, day.o = open
-      const price  = t.lastTrade?.p || t.day?.c || t.prevDay?.c;
-      const open   = t.day?.o || t.prevDay?.o || price;
-      const change = t.todaysChangePerc != null ? Math.round(t.todaysChangePerc * 100) / 100
-                   : (open ? Math.round(((price - open) / open) * 10000) / 100 : 0);
-      if (price && price > 0) {
-        const result = {
-          price:   Math.round(price * 100) / 100,
-          change,
-          volumeM: Math.round((t.day?.v || t.prevDay?.v || 0) / 1e5) / 10,
-          open:    Math.round(open * 100) / 100,
-          high:    Math.round((t.day?.h || t.prevDay?.h || price) * 100) / 100,
-          low:     Math.round((t.day?.l || t.prevDay?.l || price) * 100) / 100
-        };
-        setCache(cacheKey, result, 60 * 1000);
-        return result;
-      }
+    const todayStr = today();
+    const now = new Date().toISOString();
+    const data = await polyFetch(`/v2/aggs/ticker/${ticker}/range/1/minute/${todayStr}/${todayStr}?adjusted=true&sort=desc&limit=1`);
+    const r = data.results && data.results[0];
+    if (r && r.c > 0) {
+      // Get today's open from daily bar for accurate change %
+      let open = r.o;
+      try {
+        const day = await polyFetch(`/v2/aggs/ticker/${ticker}/range/1/day/${todayStr}/${todayStr}?adjusted=true`);
+        if (day.results && day.results[0]) open = day.results[0].o;
+      } catch(e) {}
+      const result = {
+        price:   Math.round(r.c * 100) / 100,
+        change:  open ? Math.round(((r.c - open) / open) * 10000) / 100 : 0,
+        volumeM: Math.round((r.v || 0) / 1e5) / 10,
+        open:    Math.round(open * 100) / 100,
+        high:    Math.round(r.h * 100) / 100,
+        low:     Math.round(r.l * 100) / 100
+      };
+      setCache(cacheKey, result, 60 * 1000);
+      return result;
     }
-  } catch(e) { console.error(`Snapshot error ${ticker}:`, e.message); }
+  } catch(e) { console.error(`Minute bar error ${ticker}:`, e.message); }
 
   // Fall back to previous day close
   try {
