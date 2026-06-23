@@ -1,15 +1,75 @@
 require('dotenv').config();
-const express = require('express');
-const cors    = require('cors');
-const app     = express();
-const PORT    = process.env.PORT || 3001;
+const express    = require('express');
+const cors       = require('cors');
+const Stripe     = require('stripe');
+const { createClient } = require('@supabase/supabase-js');
+const app  = express();
+const PORT = process.env.PORT || 3001;
 
 const POLYGON_KEY    = process.env.POLYGON_API_KEY;
 const FMP_KEY        = process.env.FMP_API_KEY;
 const ANTHROPIC_KEY  = process.env.ANTHROPIC_API_KEY;
 const NEWS_KEY       = process.env.NEWS_API_KEY;
+const STRIPE_SECRET  = process.env.STRIPE_SECRET_KEY;
+const STRIPE_WEBHOOK = process.env.STRIPE_WEBHOOK_SECRET;
+const STRIPE_PRICE   = process.env.STRIPE_PRICE_ID;
+const SB_URL         = process.env.SUPABASE_URL;
+const SB_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const RESEND_KEY     = process.env.RESEND_API_KEY;
+
+const stripe  = STRIPE_SECRET ? new Stripe(STRIPE_SECRET) : null;
+const sbAdmin = SB_URL && SB_SERVICE_KEY ? createClient(SB_URL, SB_SERVICE_KEY) : null;
+
+async function sendEmail({ to, subject, html }) {
+  if (!RESEND_KEY) throw new Error('RESEND_API_KEY not configured');
+  const r = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${RESEND_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: 'ProScreen <alerts@proscreen.app>', to, subject, html }),
+  });
+  if (!r.ok) { const e = await r.json(); throw new Error(e.message || 'Resend error'); }
+  return r.json();
+}
 
 app.use(cors({ origin: '*' }));
+
+// Stripe webhook must receive raw body — register before express.json()
+app.post('/api/billing/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  if (!stripe || !STRIPE_WEBHOOK) return res.status(500).json({ error: 'Stripe not configured' });
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, req.headers['stripe-signature'], STRIPE_WEBHOOK);
+  } catch (e) {
+    return res.status(400).send(`Webhook error: ${e.message}`);
+  }
+
+  const session = event.data.object;
+
+  if (event.type === 'checkout.session.completed') {
+    const sub = await stripe.subscriptions.retrieve(session.subscription);
+    await upsertSubscription(session.metadata.userId, session.customer, sub);
+  } else if (event.type === 'customer.subscription.updated' || event.type === 'customer.subscription.deleted') {
+    const customerId = session.customer;
+    const { data } = await sbAdmin.from('subscriptions').select('user_id').eq('stripe_customer_id', customerId).single();
+    if (data) await upsertSubscription(data.user_id, customerId, session);
+  }
+
+  res.json({ received: true });
+});
+
+async function upsertSubscription(userId, customerId, sub) {
+  if (!sbAdmin) return;
+  await sbAdmin.from('subscriptions').upsert({
+    user_id:                userId,
+    stripe_customer_id:     customerId,
+    stripe_subscription_id: sub.id,
+    status:                 sub.status,
+    plan:                   sub.items?.data?.[0]?.price?.id || null,
+    current_period_end:     new Date(sub.current_period_end * 1000).toISOString(),
+    updated_at:             new Date().toISOString(),
+  }, { onConflict: 'user_id' });
+}
+
 app.use(express.json());
 
 const cache = new Map();
@@ -336,36 +396,86 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-// Email alerts via Resend
+// ── BILLING ────────────────────────────────────────────────────
+
+// POST /api/billing/checkout
+app.post('/api/billing/checkout', async (req, res) => {
+  if (!stripe || !STRIPE_PRICE) return res.status(500).json({ error: 'Stripe not configured' });
+  const { userId, email, successUrl, cancelUrl } = req.body;
+  if (!userId || !email) return res.status(400).json({ error: 'userId and email required' });
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      payment_method_types: ['card'],
+      customer_email: email,
+      line_items: [{ price: STRIPE_PRICE, quantity: 1 }],
+      metadata: { userId },
+      success_url: successUrl || `${req.headers.origin || 'https://proscreen-server-production.up.railway.app'}?subscribed=true`,
+      cancel_url:  cancelUrl  || `${req.headers.origin || 'https://proscreen-server-production.up.railway.app'}?canceled=true`,
+    });
+    res.json({ url: session.url });
+  } catch (e) {
+    console.error('Checkout error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/billing/portal
+app.post('/api/billing/portal', async (req, res) => {
+  if (!stripe || !sbAdmin) return res.status(500).json({ error: 'Stripe/Supabase not configured' });
+  const { userId, returnUrl } = req.body;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  try {
+    const { data } = await sbAdmin.from('subscriptions').select('stripe_customer_id').eq('user_id', userId).single();
+    if (!data?.stripe_customer_id) return res.status(404).json({ error: 'No subscription found' });
+    const portal = await stripe.billingPortal.sessions.create({
+      customer: data.stripe_customer_id,
+      return_url: returnUrl || req.headers.origin || 'https://proscreen-server-production.up.railway.app',
+    });
+    res.json({ url: portal.url });
+  } catch (e) {
+    console.error('Portal error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/billing/status?userId=...
+app.get('/api/billing/status', async (req, res) => {
+  if (!sbAdmin) return res.status(500).json({ error: 'Supabase not configured' });
+  const { userId } = req.query;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  try {
+    const { data } = await sbAdmin.from('subscriptions').select('status,plan,current_period_end').eq('user_id', userId).single();
+    const active = data && (data.status === 'active' || data.status === 'trialing');
+    res.json({ active, status: data?.status || 'none', periodEnd: data?.current_period_end || null });
+  } catch (e) {
+    res.json({ active: false, status: 'none', periodEnd: null });
+  }
+});
+
+// ── ALERT EMAIL ────────────────────────────────────────────────
+
+// POST /api/alert-email
 app.post('/api/alert-email', async (req, res) => {
   const { to, ticker, condition, price } = req.body;
   if (!to || !ticker) return res.status(400).json({ error: 'Missing fields' });
-  const key = process.env.RESEND_API_KEY;
-  if (!key) return res.status(500).json({ error: 'RESEND_API_KEY not set' });
   try {
-    const r = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        from: 'ProScreen Alerts <onboarding@resend.dev>',
-        to: [to],
-        subject: `🔔 Alert Triggered: ${ticker}`,
-        html: `<div style="font-family:system-ui,sans-serif;max-width:500px;margin:0 auto;padding:24px;">
-          <h2 style="color:#e8b84b;">🔔 ProScreen Alert Triggered</h2>
-          <p>Your alert for <strong>${ticker}</strong> has triggered.</p>
-          <div style="background:#f7f6f3;border-radius:8px;padding:16px;margin:16px 0;">
-            <div style="font-size:22px;font-weight:600;">${ticker}</div>
-            <div style="color:#666;margin:4px 0;">${condition}</div>
-            <div style="font-size:28px;font-weight:700;color:#e8b84b;">$${price}</div>
-          </div>
-          <p style="color:#999;font-size:11px;">ProScreen Professional · Automated alert. Not financial advice.</p>
-        </div>`
-      })
+    await sendEmail({
+      to: [to],
+      subject: `ProScreen Alert: ${ticker} ${condition}`,
+      html: `<div style="font-family:system-ui,sans-serif;max-width:500px;margin:0 auto;padding:24px;">
+        <h2 style="color:#e8b84b;">ProScreen Alert Triggered</h2>
+        <p>Your alert for <strong>${ticker}</strong> has triggered.</p>
+        <div style="background:#f7f6f3;border-radius:8px;padding:16px;margin:16px 0;">
+          <div style="font-size:22px;font-weight:600;">${ticker}</div>
+          <div style="color:#666;margin:4px 0;">${condition}</div>
+          <div style="font-size:28px;font-weight:700;color:#e8b84b;">$${price}</div>
+        </div>
+        <p style="color:#999;font-size:11px;">ProScreen Professional · Automated alert. Not financial advice.</p>
+      </div>`,
     });
-    const data = await r.json();
-    if (!r.ok) return res.status(r.status).json({ error: data.message });
-    res.json({ success: true });
-  } catch(e) {
+    res.json({ sent: true });
+  } catch (e) {
     console.error('Alert email error:', e.message);
     res.status(500).json({ error: e.message });
   }
