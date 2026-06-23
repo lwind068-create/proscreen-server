@@ -443,11 +443,14 @@ app.post('/api/billing/portal', async (req, res) => {
   }
 });
 
+const OWNER_IDS = ['28f73546-1a75-409c-89e8-108b10219867'];
+
 // GET /api/billing/status?userId=...
 app.get('/api/billing/status', async (req, res) => {
   if (!sbAdmin) return res.status(500).json({ error: 'Supabase not configured' });
   const { userId } = req.query;
   if (!userId) return res.status(400).json({ error: 'userId required' });
+  if (OWNER_IDS.includes(userId)) return res.json({ active: true, status: 'owner', periodEnd: null });
   try {
     const { data } = await sbAdmin.from('subscriptions').select('status,plan,current_period_end').eq('user_id', userId).maybeSingle();
     const active = data && (data.status === 'active' || data.status === 'trialing');
