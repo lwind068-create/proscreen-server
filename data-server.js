@@ -12,7 +12,8 @@ const ANTHROPIC_KEY  = process.env.ANTHROPIC_API_KEY;
 const NEWS_KEY       = process.env.NEWS_API_KEY;
 const STRIPE_SECRET  = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WEBHOOK = process.env.STRIPE_WEBHOOK_SECRET;
-const STRIPE_PRICE   = process.env.STRIPE_PRICE_ID;
+const STRIPE_PRICE        = process.env.STRIPE_PRICE_ID;
+const STRIPE_ANNUAL_PRICE = process.env.STRIPE_ANNUAL_PRICE_ID;
 const SB_URL         = process.env.SUPABASE_URL;
 const SB_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const RESEND_KEY     = process.env.RESEND_API_KEY;
@@ -401,14 +402,16 @@ app.post('/api/chat', async (req, res) => {
 // POST /api/billing/checkout
 app.post('/api/billing/checkout', async (req, res) => {
   if (!stripe || !STRIPE_PRICE) return res.status(500).json({ error: 'Stripe not configured' });
-  const { userId, email, successUrl, cancelUrl } = req.body;
+  const { userId, email, plan, successUrl, cancelUrl } = req.body;
   if (!userId || !email) return res.status(400).json({ error: 'userId and email required' });
+  const priceId = (plan === 'annual' && STRIPE_ANNUAL_PRICE) ? STRIPE_ANNUAL_PRICE : STRIPE_PRICE;
+  if (!priceId) return res.status(500).json({ error: 'Stripe price not configured' });
   try {
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
       payment_method_types: ['card'],
       customer_email: email,
-      line_items: [{ price: STRIPE_PRICE, quantity: 1 }],
+      line_items: [{ price: priceId, quantity: 1 }],
       subscription_data: { trial_period_days: 7 },
       metadata: { userId },
       success_url: successUrl || 'https://proscreen.app/app.html?subscribed=true',
