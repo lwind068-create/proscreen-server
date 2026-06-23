@@ -409,6 +409,7 @@ app.post('/api/billing/checkout', async (req, res) => {
       payment_method_types: ['card'],
       customer_email: email,
       line_items: [{ price: STRIPE_PRICE, quantity: 1 }],
+      subscription_data: { trial_period_days: 7 },
       metadata: { userId },
       success_url: successUrl || `${req.headers.origin || 'https://proscreen-server-production.up.railway.app'}?subscribed=true`,
       cancel_url:  cancelUrl  || `${req.headers.origin || 'https://proscreen-server-production.up.railway.app'}?canceled=true`,
