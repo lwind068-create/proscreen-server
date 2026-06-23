@@ -411,8 +411,8 @@ app.post('/api/billing/checkout', async (req, res) => {
       line_items: [{ price: STRIPE_PRICE, quantity: 1 }],
       subscription_data: { trial_period_days: 7 },
       metadata: { userId },
-      success_url: successUrl || `${req.headers.origin || 'https://proscreen-server-production.up.railway.app'}?subscribed=true`,
-      cancel_url:  cancelUrl  || `${req.headers.origin || 'https://proscreen-server-production.up.railway.app'}?canceled=true`,
+      success_url: successUrl || 'https://proscreen.app/app.html?subscribed=true',
+      cancel_url:  cancelUrl  || 'https://proscreen.app/app.html?canceled=true',
     });
     res.json({ url: session.url });
   } catch (e) {
