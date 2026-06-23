@@ -50,7 +50,7 @@ app.post('/api/billing/webhook', express.raw({ type: 'application/json' }), asyn
     await upsertSubscription(session.metadata.userId, session.customer, sub);
   } else if (event.type === 'customer.subscription.updated' || event.type === 'customer.subscription.deleted') {
     const customerId = session.customer;
-    const { data } = await sbAdmin.from('subscriptions').select('user_id').eq('stripe_customer_id', customerId).single();
+    const { data } = await sbAdmin.from('subscriptions').select('user_id').eq('stripe_customer_id', customerId).maybeSingle();
     if (data) await upsertSubscription(data.user_id, customerId, session);
   }
 
@@ -427,7 +427,7 @@ app.post('/api/billing/portal', async (req, res) => {
   const { userId, returnUrl } = req.body;
   if (!userId) return res.status(400).json({ error: 'userId required' });
   try {
-    const { data } = await sbAdmin.from('subscriptions').select('stripe_customer_id').eq('user_id', userId).single();
+    const { data } = await sbAdmin.from('subscriptions').select('stripe_customer_id').eq('user_id', userId).maybeSingle();
     if (!data?.stripe_customer_id) return res.status(404).json({ error: 'No subscription found' });
     const portal = await stripe.billingPortal.sessions.create({
       customer: data.stripe_customer_id,
@@ -446,7 +446,7 @@ app.get('/api/billing/status', async (req, res) => {
   const { userId } = req.query;
   if (!userId) return res.status(400).json({ error: 'userId required' });
   try {
-    const { data } = await sbAdmin.from('subscriptions').select('status,plan,current_period_end').eq('user_id', userId).single();
+    const { data } = await sbAdmin.from('subscriptions').select('status,plan,current_period_end').eq('user_id', userId).maybeSingle();
     const active = data && (data.status === 'active' || data.status === 'trialing');
     res.json({ active, status: data?.status || 'none', periodEnd: data?.current_period_end || null });
   } catch (e) {
