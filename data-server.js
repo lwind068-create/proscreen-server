@@ -76,6 +76,7 @@ app.use(express.json());
 const cache = new Map();
 function getCache(key) { const hit = cache.get(key); if (hit && Date.now() - hit.ts < hit.ttl) return hit.data; return null; }
 function setCache(key, data, ttlMs) { cache.set(key, { data, ts: Date.now(), ttl: ttlMs }); }
+function clearFundamentalsCache() { for (const k of cache.keys()) { if (k.startsWith('fundamentals-')) cache.delete(k); } }
 function today() { return new Date().toISOString().split('T')[0]; }
 function daysAgo(n) { const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().split('T')[0]; }
 async function polyFetch(path) { const sep = path.includes('?') ? '&' : '?'; const res = await fetch(`https://api.polygon.io${path}${sep}apiKey=${POLYGON_KEY}`); if (!res.ok) throw new Error(`Polygon ${res.status}`); return res.json(); }
@@ -101,7 +102,19 @@ app.get('/api/debug/price/:ticker', async (req, res) => {
   res.json(results);
 });
 
-app.get('/api/screener', async (req, res) => { const tickers = (req.query.tickers || '').split(',').map(t => t.trim().toUpperCase()).filter(Boolean).slice(0, 50); if (!tickers.length) return res.json([]); try { const results = await Promise.allSettled(tickers.map(t => fetchMergedStock(t))); res.json(results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value)); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.get('/api/cache/clear-fundamentals', (req, res) => { clearFundamentalsCache(); res.json({ cleared: true, remaining: cache.size }); });
+
+async function throttledMap(items, fn, limit = 5) {
+  const results = [];
+  for (let i = 0; i < items.length; i += limit) {
+    const batch = items.slice(i, i + limit);
+    const settled = await Promise.allSettled(batch.map(fn));
+    results.push(...settled);
+  }
+  return results;
+}
+
+app.get('/api/screener', async (req, res) => { const tickers = (req.query.tickers || '').split(',').map(t => t.trim().toUpperCase()).filter(Boolean).slice(0, 50); if (!tickers.length) return res.json([]); try { const results = await throttledMap(tickers, t => fetchMergedStock(t), 5); res.json(results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value)); } catch (e) { res.status(500).json({ error: e.message }); } });
 
 app.get('/api/stock/:ticker', async (req, res) => { const ticker = req.params.ticker.toUpperCase(); try { const stock = await fetchMergedStock(ticker); if (!stock) return res.status(404).json({ error: 'Not found' }); res.json(stock); } catch (e) { res.status(500).json({ error: e.message }); } });
 
